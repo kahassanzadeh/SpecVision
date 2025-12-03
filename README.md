@@ -30,3 +30,20 @@ If your project is available via PyPI, use this command:
 
 ```bash
 pip install specvision
+```
+📍 Citation
+If you use SpecVision in your academic research, please cite the following paper:
+
+@article{specvision2024,
+  title={SpecVision: [Full Title of Your Paper]},
+  author={[Author 1, Author 2, Author 3]},
+  journal={[Journal or Conference]},
+  year={2024}
+}
+
+**Important Notes for Implementation:**
+
+1.  **Image Path:** I used `![SpecVision Logo](image_0ca71a.png)` at the top. You must ensure the logo file (`image_0ca71a.png`) is in the **same directory** as the `README.md` file, or update the path accordingly.
+2.  **Placeholders:** Remember to replace the bracketed placeholders (`[Short, compelling subtitle]`, `[Your Main Algorithm Name]`, `[Your License Type]`, and all citation/link details) with your project's specific information.
+
+Let me know if you'd like to refine any of the descriptions before you commit this file!
