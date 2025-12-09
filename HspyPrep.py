@@ -84,6 +84,46 @@ class HspyPrep:
         energy_eV = (h * c) / wavelength_m
         return energy_eV
 
+    # def plot_location_changes(self):
+    #     """
+    #     This function plots the SE image after the preprocessing
+    #     :return: None
+    #     """
+    #     fig, axs = plt.subplots(1, 3, figsize=(12, 6))
+
+    #     axs[0].imshow(self.se_after, cmap='gray', interpolation='nearest')
+    #     axs[0].set_title('after')
+    #     axs[0].grid(True)
+
+    #     axs[1].imshow(self.se_before, cmap='gray', interpolation='nearest')
+    #     axs[1].set_title('before')
+    #     axs[1].grid(True)
+
+    #     axs[2].imshow(self.se_after, cmap='gray', interpolation='nearest', alpha=1)
+    #     axs[2].imshow(self.se_before, cmap='hsv', interpolation='nearest', alpha=0.1)
+    #     axs[2].set_title('Both After and Before')
+    #     axs[2].axis('off')
+    #     axs[2].grid(False)
+
+    # def finding_transition_matrix(self, initial_theta, initial_tx, initial_ty):
+    #     initial_guesses = [initial_theta, initial_tx, initial_ty]
+    #     result = minimize(self.loss_function, initial_guesses, args=(self.se_after, self.se_before), method='Powell')
+    #     self.optimal_theta, self.optimal_tx, self.optimal_ty = result.x
+    #     aligned_image = self.apply_transformation(self.se_before, self.optimal_theta, self.optimal_tx, self.optimal_ty)
+
+    #     fig, ax = plt.subplots(1, 3, figsize=(20, 5))
+
+    #     ax[0].imshow(self.se_before, cmap='gray')
+    #     ax[0].set_title("Before Measurement")
+
+    #     ax[1].imshow(self.se_after, cmap='gray')
+    #     ax[1].set_title("After Measurement")
+
+    #     ax[2].imshow(aligned_image, cmap='gray')
+    #     ax[2].set_title(
+    #         f"Applying Optimal Transition Matrix to Before Image\nTheta: {self.optimal_theta:.2f}, tx: {self.optimal_tx:.2f}, ty: {self.optimal_ty:.2f}")
+    #     print(self.optimal_theta, self.optimal_tx, self.optimal_ty)
+
     def plot_spectrum(self, x, y, title='Spectrum', data=None, label_data=None, save_fig=False, address=None):
         # assert self.optimal_tx is not None, "First you need to call the transition matrix"
 
@@ -102,6 +142,25 @@ class HspyPrep:
         axd['left'].set_xlabel("X-axis (pixels)")
         axd['left'].set_ylabel("Y-axis (pixels)")
         axd['left'].grid(False)
+
+        # index_calc = (self.live_scan.shape[0] * y) + x
+        # transition_array = self.create_transition_with_matrix(self.se_before, self.se_after, self.step,
+        #                                                       self.whole_seconds, self.optimal_tx, self.optimal_ty,
+        #                                                       self.optimal_theta, pool_size=1, frame_number=index_calc)
+        # pixel_size = transition_array.shape[0] / self.live_scan.shape[0]
+        # rect_size_right = pixel_size
+        # start_x = x * pixel_size
+        # start_y = y * pixel_size
+        #
+        # axd['right'].imshow(transition_array[:, :, index_calc], cmap='gray',
+        #                     extent=(0, transition_array.shape[1], transition_array.shape[0], 0))
+        # axd['right'].set_title('Transitioned Image (Exact Location of Measurement)')
+        # rect = patches.Rectangle((start_x, start_y), rect_size_right, rect_size_right, linewidth=2, edgecolor='red',
+        #                          facecolor='none')
+        # axd['right'].add_patch(rect)
+        # axd['right'].set_xlabel("X-axis (pixels)")
+        # axd['right'].set_ylabel("Y-axis (pixels)")
+        # axd['right'].grid(False)
 
         axd['bottom'].plot(self.hsp_obj_file_path.axes_manager[2].axis, self.dataframe_obj[y][x],
                            label='Original Spectrum', color='red', linewidth=2)
@@ -285,6 +344,7 @@ class HspyPrep:
             'figure.titlesize': 18,
         })
 
+        # Create output matrix with summed counts in range
         output = np.zeros((self.dataframe_obj.shape[0], self.dataframe_obj.shape[1]))
         for i in range(self.dataframe_obj.shape[0]):
             for j in range(self.dataframe_obj.shape[1]):
@@ -311,6 +371,119 @@ class HspyPrep:
         cbar.update_ticks()
 
         plt.show()
+
+
+    # def plot_heatmap_overlay(
+    #     self,
+    #     ranges: tuple,
+    #     vmin=None,
+    #     vmax=None,
+    #     alpha: float = 0.45,
+    #     title: str = "SEM + CL Heatmap",
+    #     show_colorbar: bool = True,
+    #     save_path: str | None = None,
+    #     ):
+
+    #     # ---- Styling
+    #     plt.rcParams.update({
+    #         'font.size': 14,
+    #         'axes.titlesize': 16,
+    #         'axes.labelsize': 14,
+    #         'xtick.labelsize': 12,
+    #         'ytick.labelsize': 12,
+    #         'legend.fontsize': 12,
+    #         'figure.titlesize': 18,
+    #     })
+
+    #     H, W = self.dataframe_obj.shape[:2]
+    #     live_scan = self.live_scan
+    #     # ---- Build heatmap (sum over spectra within range)
+    #     output = np.zeros((H, W), dtype=float)
+    #     wl = self.get_wavelengths()
+
+    #     # Precompute a mask for the integration window once (faster)
+    #     lo, hi = ranges
+    #     if lo > hi:
+    #         lo, hi = hi, lo
+    #     mask = (wl >= lo) & (wl <= hi)
+
+    #     # Fill the output
+    #     # (Keeping explicit loops for clarity & low memory; vectorization is possible if needed)
+    #     for i in range(H):
+    #         for j in range(W):
+    #             spectrum = self.dataframe_obj[i, j, :]
+    #             # Your existing helper; if you prefer, sum directly with the mask:
+    #             # output[i, j] = np.nansum(np.asarray(spectrum)[mask])
+    #             output[i, j] = HspyPrep.sum_counts_in_range(spectrum, wl, (lo, hi))
+
+    #     # ---- Validate SEM image shape and scale for display
+    #     if live_scan.ndim == 2:
+    #         if live_scan.shape != (H, W):
+    #             raise ValueError(f"live_scan shape {live_scan.shape} must match {(H, W)}")
+    #         sem_img = live_scan
+    #         sem_cmap = "gray"
+    #     elif live_scan.ndim == 3 and live_scan.shape[:2] == (H, W) and live_scan.shape[2] in (3, 4):
+    #         sem_img = live_scan  # RGB/RGBA
+    #         sem_cmap = None
+    #     else:
+    #         raise ValueError("live_scan must be (H, W) grayscale or (H, W, 3/4) RGB(A) and match heatmap size.")
+
+    #     # Robust normalization of SEM image (display only; data unchanged)
+    #     # Scale to [0,1] if not already (handles arbitrary dtype/range)
+    #     sem_min = np.nanmin(sem_img)
+    #     sem_max = np.nanmax(sem_img)
+    #     if sem_cmap is not None:  # grayscale
+    #         denom = (sem_max - sem_min) if sem_max > sem_min else 1.0
+    #         sem_disp = (sem_img - sem_min) / denom
+    #     else:  # RGB(A)
+    #         denom = (sem_max - sem_min) if sem_max > sem_min else 1.0
+    #         sem_disp = (sem_img - sem_min) / denom
+
+    #     # ---- LogNorm bounds (ensure vmin>0)
+    #     finite_pos = output[np.isfinite(output) & (output > 0)]
+    #     if finite_pos.size == 0:
+    #         raise ValueError("Heatmap contains no positive values; cannot use LogNorm. Check your integration range.")
+    #     auto_vmin = np.percentile(finite_pos, 1.0)  # robust against hot pixels
+    #     auto_vmax = np.percentile(finite_pos, 99.0)
+
+    #     vmin = vmin if (vmin is not None and vmin > 0) else max(auto_vmin, np.min(finite_pos))
+    #     vmax = vmax if (vmax is not None and vmax > vmin) else auto_vmax
+
+    #     # ---- Plot
+    #     fig, ax = plt.subplots(figsize=(8, 6))
+
+    #     # Base SEM image
+    #     ax.imshow(sem_disp, cmap=sem_cmap, origin='upper', interpolation='nearest')
+
+    #     # Heatmap overlay
+    #     im = ax.imshow(
+    #         output,
+    #         cmap='inferno',
+    #         norm=LogNorm(vmin=vmin, vmax=vmax),
+    #         origin='upper',
+    #         interpolation='nearest',
+    #         alpha=alpha
+    #     )
+
+    #     ax.set_title(title)
+    #     ax.set_xlabel("X-axis (pixels)")
+    #     ax.set_ylabel("Y-axis (pixels)")
+    #     ax.grid(False)
+
+    #     # Colorbar for the heatmap only
+    #     if show_colorbar:
+    #         cbar = fig.colorbar(im, ax=ax, orientation='vertical', fraction=0.05, pad=0.04)
+    #         cbar.ax.yaxis.set_major_formatter(LogFormatter())
+    #         cbar.update_ticks()
+    #         cbar.set_label(f"Summed counts [{lo}–{hi}]")
+
+    #     fig.tight_layout()
+
+    #     if save_path:
+    #         fig.savefig(save_path, dpi=300, bbox_inches="tight")
+
+    #     plt.show()
+
 
 
 
@@ -340,6 +513,35 @@ class HspyPrep:
                 optimized_index = i
         return optimized_index
 
+    def plot_filtered_data_medfilt(self, x, y, kernel_size=7):
+        filtered_intensity = medfilt(self.dataframe_obj[y][x], kernel_size=kernel_size)
+        self.plot_spectrum(x, y, title='Filtered Data', data=filtered_intensity, label_data='Filtered Data')
+
+        # rect_size = min(image_rgb.shape[0], image_rgb.shape[1]) // 10
+        #
+        # fig, axes = plt.subplots(1, 2, figsize=(12, 6))
+        # axes[0].imshow(image_rgb, extent=(0, image_rgb.shape[1], image_rgb.shape[0], 0), cmap='gray')
+        #
+        # top_left = (x - rect_size // 2, y - rect_size // 2)
+        # rect = patches.Rectangle(top_left, rect_size, rect_size, linewidth=4, edgecolor='r', facecolor='none')
+        # axes[0].add_patch(rect)
+        #
+        # axes[0].set_title("Image with Rectangle")
+        # axes[0].set_xlabel("X-axis (pixels)")
+        # axes[0].set_ylabel("Y-axis (pixels)")
+        # # axes[0].grid(True)
+        #
+        # axes[1].plot(self.hsp_obj_file_path.axes_manager[2].axis, self.dataframe_obj[x][y], label='Original Spectrum',
+        #              color='red')
+        # axes[1].plot(self.hsp_obj_file_path.axes_manager[2].axis, filtered_intensity, label='Filtered Spectrum',
+        #              color='blue', linestyle='--')
+        #
+        # axes[1].set_title("Spectrum")
+        # axes[1].set_xlabel('Wavelength (nm)')
+        # axes[1].set_ylabel('Intensity (a.u.)')
+        # axes[1].legend()
+        # axes[1].grid(True)
+
     def apply_filter_noises(self, kernel_size=7):
         """
         This function applies the filter to the data to remove the noises and spikes
@@ -350,6 +552,58 @@ class HspyPrep:
                 self.dataframe_obj[i][j] = medfilt(self.dataframe_obj[i][j], kernel_size=kernel_size)
                 self.hsp_obj_file_path.data[i][j] = self.dataframe_obj[i][j]
 
+    def plot_peaks(self, x, y, height=100, prominence=200):
+
+        peaks, _ = find_peaks(self.dataframe_obj[y][x], height=height, prominence=prominence)
+        self.plot_spectrum(x, y, title='Filtered Data', data=peaks, label_data='Peaks')
+
+        # image = Image.open(self.file_path + 'HYPCard.jpg')
+        # image_rgb = np.array(image)
+        #
+        # peaks, _ = find_peaks(self.dataframe_obj[x][y], height=height, prominence=prominence)
+        #
+        # rect_size = min(image_rgb.shape[0], image_rgb.shape[1]) // 10
+        #
+        # fig, axes = plt.subplots(1, 2, figsize=(12, 6))
+        # axes[0].imshow(image_rgb, extent=(0, image_rgb.shape[1], image_rgb.shape[0], 0), cmap='gray')
+        #
+        # top_left = (x - rect_size // 2, y - rect_size // 2)
+        # rect = patches.Rectangle(top_left, rect_size, rect_size, linewidth=4, edgecolor='r', facecolor='none')
+        # axes[0].add_patch(rect)
+        #
+        # axes[0].set_title("Image with Rectangle")
+        # axes[0].set_xlabel("X-axis (pixels)")
+        # axes[0].set_ylabel("Y-axis (pixels)")
+        # # axes[0].grid(True)
+        #
+        # axes[1].plot(self.hsp_obj_file_path.axes_manager[2].axis, self.dataframe_obj[x][y], label='Original Spectrum',
+        #              color='red')
+        # axes[1].plot(self.hsp_obj_file_path.axes_manager[2].axis[peaks], self.dataframe_obj[x][y][peaks], 'bx',
+        #              label='Detected Peaks')
+        #
+        # axes[1].set_title("Spectrum")
+        # axes[1].set_xlabel('Wavelength (nm)')
+        # axes[1].set_ylabel('Intensity (a.u.)')
+        # axes[1].legend()
+        # # axes[1].grid(True)
+        #
+        # plt.show()
+
+    def return_peaks(self, height=100, prominence=200):
+        '''
+        Function to return the peaks of the Spectra with their Counts
+        :param height:
+        :param prominence:
+        :return: 3d list containing the peaks of the Spectra with their Counts
+        '''
+        data = [[0 for _ in range(self.dataframe_obj.shape[0])] for _ in range(self.dataframe_obj.shape[1])]
+        for i in range(self.dataframe_obj.shape[0]):
+            for j in range(self.dataframe_obj.shape[1]):
+                peaks, d = find_peaks(self.dataframe_obj[i][j], height=height, prominence=prominence)
+                data[i][j] = []
+                for t in range(len(peaks)):
+                    data[i][j].append((self.hsp_obj_file_path.axes_manager[2].axis[peaks[t]], d['peak_heights'][t]))
+        return data
 
     def remove_background(self, file_path=None):
         """
@@ -385,6 +639,86 @@ class HspyPrep:
         """
 
         return self.hsp_obj_file_path.axes_manager[2].axis
+
+    # def plot_gaussian_fitting(self, x, y, height=100, prominence=50):
+    #     peaks, _ = find_peaks(self.dataframe_obj[y][x], height=height, prominence=prominence)
+    #     # results_half = peak_widths(self.dataframe_obj[y][x], peaks, rel_height=0.5)
+    #     wavelengths = self.get_wavelengths()
+    #     peaks_below_920 = [peak for peak in peaks if wavelengths[peak] < 920]
+
+    #     if len(peaks_below_920) > 1:
+    #         avg_peak_below_920 = int(np.mean(peaks_below_920))
+    #         peaks = [peak for peak in peaks if wavelengths[peak] >= 920]
+    #         peaks.append(avg_peak_below_920)
+
+    #     peaks_950_1100 = [peak for peak in peaks if 950 <= wavelengths[peak] <= 1100]
+    #     if len(peaks_950_1100) > 1:
+    #         avg_peak_950_1100 = int(np.mean(peaks_950_1100))
+    #         peaks = [peak for peak in peaks if not (950 <= wavelengths[peak] <= 1100)]
+    #         peaks.append(avg_peak_950_1100)
+
+    #     plt.plot(wavelengths, self.dataframe_obj[y][x])
+
+    #     for peak_index in peaks:
+    #         fit_range = 10
+    #         lower_bound = max(0, peak_index - fit_range)
+    #         upper_bound = min(len(wavelengths), peak_index + fit_range)
+
+    #         x_data = wavelengths[lower_bound:upper_bound]
+    #         y_data = self.dataframe_obj[y][x][lower_bound:upper_bound]
+
+    #         initial_guess = [y_data.max(), wavelengths[peak_index], 1.0]
+
+    #         try:
+    #             popt, _ = curve_fit(self.gaussian, x_data, y_data, p0=initial_guess)
+    #             amp, mean, sigma = popt
+    #             print(
+    #                 f"Gaussian Fit - Peak at {wavelengths[peak_index]:.2f} nm: Amplitude = {amp:.2f}, Mean = {mean:.2f}, Sigma = {sigma:.2f}")
+
+    #             x_fit = self.get_wavelengths()
+    #             y_fit = self.gaussian(x_fit, *popt)
+    #             plt.plot(x_fit, y_fit, label=f'Peak at {mean:.2f} nm')
+    #         except RuntimeError:
+    #             print(f"Gaussian fit failed for peak at {wavelengths[peak_index]:.2f} nm")
+
+    # def gaussian_fitting(self, x, y, height=100, prominence=50):
+
+    #     peaks, _ = find_peaks(self.dataframe_obj[y][x], height=height, prominence=prominence)
+    #     # results_half = peak_widths(self.dataframe_obj[y][x], peaks, rel_height=0.5)
+    #     coefs_gaussian = []
+    #     wavelengths = self.get_wavelengths()
+    #     peaks_below_940 = [peak for peak in peaks if wavelengths[peak] < 940]
+
+    #     if len(peaks_below_940) > 1:
+    #         avg_peak_below_920 = int(np.mean(peaks_below_940))
+    #         peaks = [peak for peak in peaks if wavelengths[peak] >= 940]
+    #         peaks.append(avg_peak_below_920)
+
+    #     peaks_950_1100 = [peak for peak in peaks if 950 <= wavelengths[peak] <= 1100]
+    #     if len(peaks_950_1100) > 1:
+    #         avg_peak_950_1100 = int(np.mean(peaks_950_1100))
+    #         peaks = [peak for peak in peaks if not (950 <= wavelengths[peak] <= 1100)]
+    #         peaks.append(avg_peak_950_1100)
+
+    #     plt.plot(wavelengths, self.dataframe_obj[y][x])
+
+    #     for peak_index in peaks:
+    #         fit_range = 10
+    #         lower_bound = max(0, peak_index - fit_range)
+    #         upper_bound = min(len(wavelengths), peak_index + fit_range)
+
+    #         x_data = wavelengths[lower_bound:upper_bound]
+    #         y_data = self.dataframe_obj[y][x][lower_bound:upper_bound]
+
+    #         initial_guess = [y_data.max(), wavelengths[peak_index], 1.0]
+
+    #         try:
+    #             popt, _ = curve_fit(self.gaussian, x_data, y_data, p0=initial_guess)
+    #             amp, mean, sigma = popt
+    #             coefs_gaussian.append({'amp': amp, 'mean': mean, 'sigma': sigma})
+    #         except RuntimeError:
+    #             print(f"Gaussian fit failed for peak at {wavelengths[peak_index]:.2f} nm")
+    #     return coefs_gaussian
 
     def get_live_scan(self):
         """
