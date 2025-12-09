@@ -2,7 +2,7 @@ import tkinter as tk
 from tkinter import ttk, messagebox
 try:
     from HspyPrep import HspyPrep
-    from new_cd import CondAns
+    from SpecVision import CondAns
 except ImportError:
     try:
         messagebox.showerror(

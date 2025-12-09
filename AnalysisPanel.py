@@ -11,7 +11,7 @@ from PlotFrame import PlotFrame
 
 try:
     from HspyPrep import HspyPrep
-    from new_cd import CondAns
+    from SpecVision import CondAns
 except ImportError as e:
     raise
 
@@ -1545,8 +1545,10 @@ class AnalysisPanel:
         ttk.Label(r2, text="| Colormap:").pack(side=tk.LEFT, padx=(10, 0))
         self.pmap_cmap = tk.StringVar(value="viridis")
         cmaps = ['viridis', 'plasma', 'inferno', 'magma', 'turbo', 'jet', 'coolwarm', 'seismic']
-        ttk.Combobox(r2, textvariable=self.pmap_cmap, values=cmaps, width=10).pack(side=tk.LEFT, padx=5)
-        self.pmap_cmap_cb = self.nb.nametowidget(self.pmap_cmap._name)  # hack to bind if needed, or just bind var trace
+
+        self.pmap_cmap_cb = ttk.Combobox(r2, textvariable=self.pmap_cmap, values=cmaps, width=10)
+        self.pmap_cmap_cb.pack(side=tk.LEFT, padx=5)
+        self.pmap_cmap_cb.bind("<<ComboboxSelected>>", lambda _: self._draw_param_map())
 
         ttk.Label(r2, text="| Alpha:").pack(side=tk.LEFT, padx=(10, 0))
         self.pmap_alpha = tk.DoubleVar(value=0.6)
@@ -1586,7 +1588,6 @@ class AnalysisPanel:
         toolbar.update()
         toolbar.pack(side=tk.BOTTOM, fill=tk.X)
 
-        # Internal storage for the dataframe
         self.pmap_df = None
 
     def _load_map_file(self):

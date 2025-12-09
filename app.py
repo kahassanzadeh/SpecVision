@@ -3,7 +3,7 @@ from tkinter import ttk, filedialog, messagebox, simpledialog
 from DataLoadingPanel import DataLoadingPanel
 try:
     from HspyPrep import HspyPrep
-    from new_cd import CondAns
+    from SpecVision import CondAns
 except ImportError:
     try:
         messagebox.showerror(

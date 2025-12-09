@@ -8,7 +8,7 @@ from PreprocessingPanel import PreprocessingPanel
 
 try:
     from HspyPrep import HspyPrep
-    from new_cd import CondAns
+    from SpecVision import CondAns
 except ImportError:
     try:
         messagebox.showerror(
