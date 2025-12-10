@@ -26,6 +26,3 @@ if __name__ == "__main__":
 
     app = DataLoadingPanel(root)
     root.mainloop()
-
-#TODO: Fitting Spectra need to have cancel section and also coded with parallezation
-#TODO: Process bar for fitting all is not working
