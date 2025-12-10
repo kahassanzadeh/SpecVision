@@ -6,9 +6,14 @@ from scipy.signal import medfilt
 import matplotlib.pyplot as plt
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg, NavigationToolbar2Tk
 from lmfit.models import GaussianModel, LorentzianModel, VoigtModel, ExponentialGaussianModel, ConstantModel
-
+from skimage.exposure import match_histograms
+from skimage.metrics import structural_similarity as ssim
+import matplotlib.patches as patches
+from matplotlib.gridspec import GridSpec
 from PlotFrame import PlotFrame
-
+import threading
+import pickle
+import os
 try:
     from HspyPrep import HspyPrep
     from SpecVision import CondAns
@@ -57,6 +62,8 @@ class AnalysisPanel:
         self._build_tab_single_spectrum()
         self._build_tab_waterfall()
         self._build_tab_parameter_maps()
+        self._build_tab_pixel_matching()
+        self._build_tab_comparison()
 
         if hasattr(self, 'ss_map'):
             self.ss_map.canvas.mpl_connect('button_press_event', self._on_map_click)
@@ -1722,3 +1729,915 @@ class AnalysisPanel:
 
         except Exception as e:
             print(f"Map Draw Error: {e}")
+
+    def _build_tab_pixel_matching(self):
+        """Builds the Pixel Matching / Alignment Panel."""
+        tab = ttk.Frame(self.nb)
+        self.nb.add(tab, text="Pixel Matching")
+
+        # --- 1. Controls ---
+        controls = ttk.LabelFrame(tab, text="Matching Parameters")
+        controls.pack(fill=tk.X, padx=10, pady=5)
+
+        # Row 1: Selection
+        r1 = ttk.Frame(controls)
+        r1.pack(fill=tk.X, pady=2, padx=5)
+
+        keys = list(self.cond_ans.data_dict.keys())
+
+        # --- NEW: Reference Dropdown ---
+        ttk.Label(r1, text="Reference (Ground Truth):").pack(side=tk.LEFT)
+        self.pm_ref_var = tk.StringVar(value=self.ref_key)
+        # Ensure default is valid
+        if self.ref_key not in keys and keys: self.pm_ref_var.set(keys[0])
+
+        self.pm_ref_menu = ttk.OptionMenu(r1, self.pm_ref_var, self.pm_ref_var.get(), *keys,
+                                          command=lambda _: self._pm_update_maps())
+        self.pm_ref_menu.pack(side=tk.LEFT, padx=5)
+
+        ttk.Label(r1, text="|  Test Target:").pack(side=tk.LEFT, padx=(15, 5))
+        self.pm_target_var = tk.StringVar()
+
+        # Default Target (try to pick something different from Ref)
+        targets = [k for k in keys if k != self.pm_ref_var.get()]
+        if not targets and keys: targets = keys
+        if targets: self.pm_target_var.set(targets[0])
+
+        ttk.OptionMenu(r1, self.pm_target_var, self.pm_target_var.get(), *keys,
+                       command=lambda _: self._pm_update_maps()).pack(side=tk.LEFT)
+
+        # Row 2: Parameters
+        r2 = ttk.Frame(controls)
+        r2.pack(fill=tk.X, pady=5, padx=5)
+
+        ttk.Label(r2, text="Window Size (px):").pack(side=tk.LEFT)
+        self.pm_winsize = tk.IntVar(value=11)
+        ttk.Spinbox(r2, from_=3, to=51, increment=2, textvariable=self.pm_winsize, width=4).pack(side=tk.LEFT, padx=5)
+
+        ttk.Label(r2, text="Search Radius (px):").pack(side=tk.LEFT, padx=(10, 0))
+        self.pm_radius = tk.IntVar(value=15)
+        ttk.Spinbox(r2, from_=1, to=100, textvariable=self.pm_radius, width=4).pack(side=tk.LEFT, padx=5)
+
+        ttk.Label(r2, text="|  ").pack(side=tk.LEFT)
+        ttk.Button(r2, text="Run Full Mapping (All Pixels)", style="Accent.TButton",
+                   command=self._pm_run_full).pack(side=tk.RIGHT, padx=5)
+
+        ttk.Label(r2, text="(Click on Left Map to Test Match)").pack(side=tk.LEFT, padx=10)
+
+        # --- 2. Visualization Area ---
+        paned = tk.PanedWindow(tab, orient=tk.VERTICAL, sashrelief=tk.RAISED)
+        paned.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
+
+        # TOP: Full Maps (Ref vs Target)
+        maps_frame = ttk.Frame(paned)
+        paned.add(maps_frame, height=400)
+
+        # Left Map (Ref)
+        self.pm_fig_ref = plt.Figure(figsize=(4, 4), dpi=100)
+        self.pm_can_ref = FigureCanvasTkAgg(self.pm_fig_ref, master=maps_frame)
+        self.pm_can_ref.get_tk_widget().pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=(0, 2))
+        self.pm_can_ref.mpl_connect('button_press_event', self._on_pm_ref_click)
+
+        # Right Map (Target)
+        self.pm_fig_tar = plt.Figure(figsize=(4, 4), dpi=100)
+        self.pm_can_tar = FigureCanvasTkAgg(self.pm_fig_tar, master=maps_frame)
+        self.pm_can_tar.get_tk_widget().pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=(2, 0))
+
+        # BOTTOM: Detail/Zoom Views
+        detail_frame = ttk.LabelFrame(paned, text="Match Details (Zoom)")
+        paned.add(detail_frame, height=200)
+
+        self.pm_fig_zoom = plt.Figure(figsize=(8, 2.5), dpi=100)
+        self.pm_can_zoom = FigureCanvasTkAgg(self.pm_fig_zoom, master=detail_frame)
+        self.pm_can_zoom.get_tk_widget().pack(fill=tk.BOTH, expand=True)
+
+        self._pm_update_maps()
+
+    def _pm_update_maps(self):
+        """Draws the initial Ref and Target maps."""
+        try:
+            # 1. Ref Image (Now Dynamic)
+            ref_key = self.pm_ref_var.get()
+            if ref_key not in self.cond_ans.data_dict: return
+
+            img_ref = self.cond_ans.data_dict[ref_key].get_live_scan()
+
+            ax_ref = self.pm_fig_ref.gca()
+            ax_ref.clear()
+            ax_ref.imshow(img_ref, cmap='gray')
+            ax_ref.set_title(f"Reference: {ref_key}")
+            ax_ref.axis('off')
+            self.pm_can_ref.draw()
+
+            # 2. Target Image
+            tar_key = self.pm_target_var.get()
+            if tar_key and tar_key in self.cond_ans.data_dict:
+                img_tar = self.cond_ans.data_dict[tar_key].get_live_scan()
+
+                # Apply Histogram Matching to Ref
+                try:
+                    from skimage.exposure import match_histograms
+                    img_tar_matched = match_histograms(img_tar, img_ref)
+                except Exception:
+                    img_tar_matched = img_tar
+
+                ax_tar = self.pm_fig_tar.gca()
+                ax_tar.clear()
+                ax_tar.imshow(img_tar_matched, cmap='gray')
+                ax_tar.set_title(f"Target: {tar_key} (Hist. Matched)")
+                ax_tar.axis('off')
+                self.pm_can_tar.draw()
+
+                # Clear zoom
+                self.pm_fig_zoom.clear()
+                self.pm_can_zoom.draw()
+
+        except Exception as e:
+            print(f"PM Update Error: {e}")
+
+    def _on_pm_ref_click(self, event):
+        """Handles click on Ref map to test matching for that specific pixel."""
+        if event.inaxes != self.pm_fig_ref.gca(): return
+
+        try:
+            # 1. Get Coordinates
+            c, r = int(event.xdata), int(event.ydata)
+
+            w_size = self.pm_winsize.get()
+            if w_size % 2 == 0: w_size += 1
+            radius = self.pm_radius.get()
+
+            # --- USE SELECTED REFERENCE ---
+            ref_key = self.pm_ref_var.get()
+            tar_key = self.pm_target_var.get()
+
+            if ref_key == tar_key:
+                # Trivial case, but let's allow it for testing
+                pass
+
+            img_ref = self.cond_ans.data_dict[ref_key].get_live_scan()
+            img_tar = self.cond_ans.data_dict[tar_key].get_live_scan()
+
+            # Hist Match
+            from skimage.exposure import match_histograms
+            img_tar = match_histograms(img_tar, img_ref)
+
+            # ... (Rest of logic is identical, just uses img_ref/img_tar) ...
+
+            # Pad
+            pad = w_size // 2
+            img_ref_pad = np.pad(img_ref, pad, mode='reflect')
+            img_tar_pad = np.pad(img_tar, pad, mode='reflect')
+
+            pr, pc = r + pad, c + pad
+            win_ref = img_ref_pad[pr - pad: pr + pad + 1, pc - pad: pc + pad + 1]
+
+            # Search
+            best_score = -1.0
+            best_r, best_c = r, c
+
+            from skimage.metrics import structural_similarity as ssim
+
+            min_r = max(pad, pr - radius)
+            max_r = min(img_tar_pad.shape[0] - pad, pr + radius + 1)
+            min_c = max(pad, pc - radius)
+            max_c = min(img_tar_pad.shape[1] - pad, pc + radius + 1)
+
+            d_range = max(img_ref.max(), img_tar.max()) - min(img_ref.min(), img_tar.min())
+            if d_range == 0: d_range = 1
+
+            for i in range(min_r, max_r):
+                for j in range(min_c, max_c):
+                    win_tar = img_tar_pad[i - pad: i + pad + 1, j - pad: j + pad + 1]
+                    score = ssim(win_ref, win_tar, data_range=d_range,
+                                 gaussian_weights=True, win_size=w_size,
+                                 use_sample_covariance=False)
+                    if score > best_score:
+                        best_score = score
+                        best_r, best_c = i - pad, j - pad
+
+            # Update Visuals
+            ax_ref = self.pm_fig_ref.gca()
+            for p in list(ax_ref.patches): p.remove()
+            for l in list(ax_ref.lines): l.remove()
+
+            rect_ref = patches.Rectangle((c - w_size / 2, r - w_size / 2), w_size, w_size,
+                                         linewidth=1.5, edgecolor='red', facecolor='none')
+            ax_ref.add_patch(rect_ref)
+            ax_ref.plot(c, r, 'r+')
+            self.pm_can_ref.draw()
+
+            ax_tar = self.pm_fig_tar.gca()
+            for p in list(ax_tar.patches): p.remove()
+            for l in list(ax_tar.lines): l.remove()
+
+            rect_tar = patches.Rectangle((best_c - w_size / 2, best_r - w_size / 2), w_size, w_size,
+                                         linewidth=1.5, edgecolor='lime', facecolor='none')
+            ax_tar.add_patch(rect_tar)
+            ax_tar.plot(best_c, best_r, 'g+')
+            self.pm_can_tar.draw()
+
+            # Zoom
+            self.pm_fig_zoom.clear()
+            axs = self.pm_fig_zoom.subplots(1, 3)
+
+            axs[0].imshow(win_ref, cmap='gray')
+            axs[0].set_title(f"Ref: {ref_key}\n({r}, {c})")
+            axs[0].axis('off')
+
+            br_p, bc_p = best_r + pad, best_c + pad
+            win_best = img_tar_pad[br_p - pad: br_p + pad + 1, bc_p - pad: bc_p + pad + 1]
+
+            axs[1].imshow(win_best, cmap='gray')
+            axs[1].set_title(f"Target: {tar_key}\n({best_r}, {best_c})")
+            axs[1].axis('off')
+
+            axs[2].text(0.5, 0.5, f"SSIM Score:\n{best_score:.4f}\n\nShift:\ndr={best_r - r}\ndc={best_c - c}",
+                        ha='center', va='center', fontsize=12)
+            axs[2].axis('off')
+
+            self.pm_can_zoom.draw()
+
+        except Exception as e:
+            print(f"Match Test Error: {e}")
+
+    def _pm_run_full(self):
+        """Starts the full mapping process in a separate thread."""
+        w_size = self.pm_winsize.get()
+        radius = self.pm_radius.get()
+        ref_key = self.pm_ref_var.get()
+
+        # 1. Ask Where to Save (NEW)
+        save_fn = filedialog.asksaveasfilename(
+            title="Save Coordinate Map",
+            defaultextension=".pkl",
+            filetypes=[("Pickle File", "*.pkl"), ("All Files", "*.*")]
+        )
+        if not save_fn: return
+
+        # 2. Confirmation
+        ans = messagebox.askyesno("Confirm Run",
+                                  f"Run pixel matching for ALL datasets against '{ref_key}'?\n\n"
+                                  f"• Window Size: {w_size}\n"
+                                  f"• Search Radius: {radius}\n"
+                                  f"• Output: {os.path.basename(save_fn)}\n\n"
+                                  "This runs in the background. It may take time.", parent=self.window)
+        if not ans: return
+
+        # 3. Create Progress Window
+        self.pm_prog_win = tk.Toplevel(self.window)
+        self.pm_prog_win.title("Pixel Matching in Progress...")
+        self.pm_prog_win.geometry("400x160")
+        self.pm_prog_win.transient(self.window)
+        self.pm_prog_win.protocol("WM_DELETE_WINDOW", self._pm_cancel)
+
+        # Center
+        try:
+            x = self.window.winfo_x() + self.window.winfo_width() // 2 - 200
+            y = self.window.winfo_y() + self.window.winfo_height() // 2 - 80
+            self.pm_prog_win.geometry(f"+{x}+{y}")
+        except:
+            pass
+
+        self.pm_prog_lbl = tk.StringVar(value="Initializing...")
+        ttk.Label(self.pm_prog_win, textvariable=self.pm_prog_lbl, font=("Segoe UI", 10)).pack(pady=(20, 5))
+
+        self.pm_prog_var = tk.DoubleVar(value=0)
+        self.pb = ttk.Progressbar(self.pm_prog_win, variable=self.pm_prog_var, mode='determinate', maximum=100)
+        self.pb.pack(fill=tk.X, padx=30, pady=10)
+
+        ttk.Button(self.pm_prog_win, text="Stop / Cancel", command=self._pm_cancel).pack(pady=10)
+
+        self.pm_stop_flag = False
+        self.pm_is_running = True
+
+        # 4. Start Thread (Pass save_fn)
+        t = threading.Thread(target=self._pm_thread_target,
+                             args=(w_size, radius, ref_key, save_fn),
+                             daemon=True)
+        t.start()
+
+    def _pm_cancel(self):
+        """Signals the thread to stop."""
+        if self.pm_is_running:
+            self.pm_stop_flag = True
+            self.pm_prog_lbl.set("Cancelling... please wait for current step.")
+
+    def _pm_thread_target(self, w_size, radius, ref_key, save_fn):
+        """Background thread that matches ALL datasets against the Reference."""
+        try:
+            from skimage.exposure import match_histograms
+            from skimage.metrics import structural_similarity as ssim
+            import pickle
+            import numpy as np
+
+            data_dict = self.cond_ans.data_dict
+            keys = list(data_dict.keys())
+
+            # Helper to update UI safely
+            def update_ui(val, text):
+                if not self.pm_stop_flag:
+                    self.window.after(0, lambda: self.pm_prog_var.set(val))
+                    self.window.after(0, lambda: self.pm_prog_lbl.set(text))
+
+            # ---------------------------------------------------------
+            # Phase 1: Histogram Matching (Normalize all to Ref)
+            # ---------------------------------------------------------
+            if self.pm_stop_flag: return
+            update_ui(0, "Phase 1: Normalizing Histograms...")
+
+            image_ref = data_dict[ref_key].get_live_scan()
+
+            # Match every dataset to the reference histogram
+            for key, value in data_dict.items():
+                if self.pm_stop_flag: break
+                try:
+                    # Modify in-place (or you could copy if you prefer safety)
+                    value.live_scan = match_histograms(value.live_scan, image_ref)
+                except Exception:
+                    pass
+
+            # ---------------------------------------------------------
+            # Phase 2: Pixel Mapping (The Heavy Loop)
+            # ---------------------------------------------------------
+            mapping_save = dict()
+            mapping_save['ref'] = ref_key
+
+            # Identify all targets (everyone except the reference itself)
+            targets = [k for k in keys if k != ref_key]
+
+            h, w = image_ref.shape
+            pad = w_size // 2
+
+            # Pre-pad Reference Image once
+            img_ref_pad = np.pad(image_ref, pad, mode='reflect')
+
+            # Calculate total work for progress bar
+            # Total Pixels to Process = (Num Targets) * (Rows) * (Cols)
+            total_pixels_all = len(targets) * h * w
+            if total_pixels_all == 0: total_pixels_all = 1
+
+            global_processed_count = 0
+
+            # --- OUTER LOOP: Iterate over every Target Dataset ---
+            for t_idx, key in enumerate(targets):
+                if self.pm_stop_flag: break
+
+                target_img = data_dict[key].get_live_scan()
+                img_tar_pad = np.pad(target_img, pad, mode='reflect')
+
+                # Dynamic Range for SSIM
+                d_range = max(image_ref.max(), target_img.max()) - min(image_ref.min(), target_img.min())
+                if d_range == 0: d_range = 1
+
+                current_mapping = {}
+
+                # --- INNER LOOP: Rows & Cols ---
+                for r in range(h):
+                    if self.pm_stop_flag: break
+
+                    # Update Progress Bar
+                    # Scale progress to 95% max, leaving 5% for saving
+                    pct = (global_processed_count / total_pixels_all) * 95
+                    update_ui(pct, f"Mapping '{key}' ({t_idx + 1}/{len(targets)}): Row {r}/{h}...")
+
+                    for c in range(w):
+                        # 1. Extract Ref Window
+                        pr, pc = r + pad, c + pad
+                        win_ref = img_ref_pad[pr - pad: pr + pad + 1, pc - pad: pc + pad + 1]
+
+                        # 2. Search Bounds
+                        min_r = max(pad, pr - radius)
+                        max_r = min(img_tar_pad.shape[0] - pad, pr + radius + 1)
+                        min_c = max(pad, pc - radius)
+                        max_c = min(img_tar_pad.shape[1] - pad, pc + radius + 1)
+
+                        best_score = -2.0
+                        best_r, best_c = r, c
+
+                        # 3. Search Loop
+                        for i in range(min_r, max_r):
+                            for j in range(min_c, max_c):
+                                win_tar = img_tar_pad[i - pad: i + pad + 1, j - pad: j + pad + 1]
+
+                                score = ssim(win_ref, win_tar, data_range=d_range,
+                                             gaussian_weights=True, win_size=w_size,
+                                             use_sample_covariance=False)
+
+                                if score > best_score:
+                                    best_score = score
+                                    best_r, best_c = i - pad, j - pad
+
+                        current_mapping[(r, c)] = (best_r, best_c)
+                        global_processed_count += 1
+
+                # Save the result for this specific target
+                mapping_save[key] = current_mapping
+
+            # ---------------------------------------------------------
+            # Phase 3: Saving Results
+            # ---------------------------------------------------------
+            if not self.pm_stop_flag:
+                update_ui(98, f"Saving to {os.path.basename(save_fn)}...")
+
+                # Add the "ref" entry which is just a list of all coordinates
+                # (This matches your original library logic: mapping_save['ref'] = list(mapping.keys()))
+                all_coords = [(r, c) for r in range(h) for c in range(w)]
+                mapping_save['ref'] = all_coords
+
+                with open(save_fn, "wb") as file:
+                    pickle.dump(mapping_save, file)
+
+                # Update main object state
+                self.cond_ans.data_coordinates = mapping_save
+
+                self.window.after(0, lambda: self._pm_on_finish(True))
+            else:
+                self.window.after(0, lambda: self._pm_on_finish(False, "Cancelled"))
+
+        except Exception as e:
+            print(f"Thread Error: {e}")
+            import traceback
+            traceback.print_exc()
+            self.window.after(0, lambda: self._pm_on_finish(False, str(e)))
+
+        finally:
+            self.pm_is_running = False
+
+    def _pm_on_finish(self, success, error_msg=""):
+        """Called when thread finishes or stops."""
+        try:
+            self.pm_prog_win.destroy()
+        except:
+            pass
+
+        if success:
+            messagebox.showinfo("Success", "Pixel matching complete!\nResults saved.", parent=self.window)
+        else:
+            if "Cancelled" in error_msg:
+                messagebox.showinfo("Cancelled", "Process stopped by user.", parent=self.window)
+            else:
+                messagebox.showerror("Error", f"An error occurred:\n{error_msg}", parent=self.window)
+
+    def _on_comp_arrow(self, dc, dr):
+        """Handles arrow key navigation for Comparison Panel."""
+        try:
+            r, c = self.comp_r.get(), self.comp_c.get()
+
+            # Get bounds from reference
+            ref_key = self.ref_key
+            if ref_key in self.cond_ans.data_dict:
+                data = self.cond_ans.data_dict[ref_key].get_numpy_spectra()
+                max_r, max_c = data.shape[:2]
+
+                new_r = np.clip(r + dr, 0, max_r - 1)
+                new_c = np.clip(c + dc, 0, max_c - 1)
+
+                if new_r != r or new_c != c:
+                    self.comp_r.set(new_r)
+                    self.comp_c.set(new_c)
+                    self._comp_update()
+        except:
+            pass
+    def _comp_move_up(self):
+        """Moves selected condition up in the list."""
+        try:
+            idx = self.comp_listbox.curselection()[0]
+            if idx > 0:
+                text = self.comp_listbox.get(idx)
+                self.comp_listbox.delete(idx)
+                self.comp_listbox.insert(idx - 1, text)
+                self.comp_listbox.selection_set(idx - 1)
+                self._comp_update()
+        except:
+            pass
+
+    def _comp_move_down(self):
+        """Moves selected condition down in the list."""
+        try:
+            idx = self.comp_listbox.curselection()[0]
+            if idx < self.comp_listbox.size() - 1:
+                text = self.comp_listbox.get(idx)
+                self.comp_listbox.delete(idx)
+                self.comp_listbox.insert(idx + 1, text)
+                self.comp_listbox.selection_set(idx + 1)
+                self._comp_update()
+        except:
+            pass
+
+    def _on_comp_click(self, event):
+        """Updates the Reference Pixel based on click on the map figure."""
+        if event.inaxes is None: return
+        if event.canvas != self.comp_map_canvas: return
+
+        c, r = int(event.xdata), int(event.ydata)
+        self.comp_r.set(r)
+        self.comp_c.set(c)
+        self._comp_update()
+
+    def _build_tab_comparison(self):
+        """Builds the 'Condition Comparison' panel with a Split Layout (Map | Results)."""
+        tab = ttk.Frame(self.nb)
+        self.nb.add(tab, text="Comparison (Evolution)")
+
+        # Main Container
+        main_layout = ttk.Frame(tab)
+        main_layout.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
+
+        # === LEFT SIDEBAR: Conditions Order (Unchanged) ===
+        left_sidebar = ttk.LabelFrame(main_layout, text="Conditions")
+        left_sidebar.pack(side=tk.LEFT, fill=tk.Y, padx=(0, 5))
+
+        self.comp_listbox = tk.Listbox(left_sidebar, selectmode=tk.SINGLE, width=20)
+        self.comp_listbox.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
+        for k in self.cond_ans.data_dict.keys():
+            self.comp_listbox.insert(tk.END, k)
+
+        btn_frame = ttk.Frame(left_sidebar)
+        btn_frame.pack(fill=tk.X, padx=5, pady=5)
+        ttk.Button(btn_frame, text="▲", width=3, command=self._comp_move_up).pack(side=tk.LEFT, expand=True)
+        ttk.Button(btn_frame, text="▼", width=3, command=self._comp_move_down).pack(side=tk.LEFT, expand=True)
+
+        # === RIGHT SIDE: Controls + SPLIT PLOTS ===
+        right_content = ttk.Frame(main_layout)
+        right_content.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+
+        # --- Controls Row 1 ---
+        c_row1 = ttk.Frame(right_content)
+        c_row1.pack(fill=tk.X, pady=2)
+        ttk.Label(c_row1, text="Ref Pixel (r,c):").pack(side=tk.LEFT)
+        self.comp_r = tk.IntVar(value=0)
+        self.comp_c = tk.IntVar(value=0)
+        ttk.Entry(c_row1, textvariable=self.comp_r, width=5).pack(side=tk.LEFT)
+        ttk.Entry(c_row1, textvariable=self.comp_c, width=5).pack(side=tk.LEFT)
+        ttk.Label(c_row1, text="| Search Window:").pack(side=tk.LEFT, padx=(10, 0))
+        self.comp_winsize = tk.IntVar(value=11)
+        ttk.Entry(c_row1, textvariable=self.comp_winsize, width=4).pack(side=tk.LEFT)
+        ttk.Label(c_row1, text="Radius:").pack(side=tk.LEFT)
+        self.comp_radius = tk.IntVar(value=15)
+        ttk.Entry(c_row1, textvariable=self.comp_radius, width=4).pack(side=tk.LEFT)
+        ttk.Button(c_row1, text="Update", style="Accent.TButton", command=self._comp_update).pack(side=tk.RIGHT, padx=5)
+
+        # --- Controls Row 2 ---
+        c_row2 = ttk.Frame(right_content)
+        c_row2.pack(fill=tk.X, pady=2)
+        ttk.Label(c_row2, text="WL Range:").pack(side=tk.LEFT)
+        self.comp_w0 = tk.DoubleVar(value=0)
+        self.comp_w1 = tk.DoubleVar(value=0)
+        ttk.Entry(c_row2, textvariable=self.comp_w0, width=5).pack(side=tk.LEFT)
+        ttk.Label(c_row2, text="-").pack(side=tk.LEFT)
+        ttk.Entry(c_row2, textvariable=self.comp_w1, width=5).pack(side=tk.LEFT)
+        ttk.Label(c_row2, text="| Norm:").pack(side=tk.LEFT, padx=(10, 0))
+        self.comp_norm = tk.StringVar(value="None")
+        ttk.OptionMenu(c_row2, self.comp_norm, "None", "None", "Max", "Area").pack(side=tk.LEFT)
+        ttk.Label(c_row2, text="Cmap:").pack(side=tk.LEFT, padx=(5, 0))
+        self.comp_cmap = tk.StringVar(value="turbo")
+        cmaps = ["turbo", "viridis", "plasma", "inferno", "gray"]
+        ttk.OptionMenu(c_row2, self.comp_cmap, "turbo", *cmaps).pack(side=tk.LEFT)
+        ttk.Label(c_row2, text="Offset:").pack(side=tk.LEFT, padx=(5, 0))
+        self.comp_offset = tk.DoubleVar(value=0.0)
+        ttk.Entry(c_row2, textvariable=self.comp_offset, width=5).pack(side=tk.LEFT)
+        self.comp_live_fit = tk.BooleanVar(value=False)
+        ttk.Checkbutton(c_row2, text="Live Fit", variable=self.comp_live_fit, command=self._comp_update).pack(
+            side=tk.LEFT, padx=10)
+
+        # --- Controls Row 3 ---
+        c_row3 = ttk.Frame(right_content)
+        c_row3.pack(fill=tk.X, pady=2)
+        ttk.Label(c_row3, text="Trend Y-Axis:").pack(side=tk.LEFT)
+        self.comp_trend_param = tk.StringVar(value="Max Int")
+        self.comp_trend_menu = ttk.OptionMenu(c_row3, self.comp_trend_param, "Max Int", "Max Int")
+        self.comp_trend_menu.pack(side=tk.LEFT, padx=5)
+
+        # === SPLIT PANE (Map vs Results) ===
+        paned = tk.PanedWindow(right_content, orient=tk.HORIZONTAL, sashrelief=tk.RAISED)
+        paned.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
+
+        # 1. LEFT PANE: Reference Map
+        self.comp_left_frame = ttk.Frame(paned)
+        paned.add(self.comp_left_frame, width=300)  # Fixed width for map like waterfall tab
+
+        ttk.Label(self.comp_left_frame, text="Reference Map (Click to set Pixel)", font=("Segoe UI", 9, "bold")).pack(
+            pady=(5, 0))
+
+        from matplotlib.figure import Figure
+        self.comp_map_fig = Figure(figsize=(4, 4), dpi=100)
+        self.comp_map_canvas = FigureCanvasTkAgg(self.comp_map_fig, master=self.comp_left_frame)
+        self.comp_map_canvas.get_tk_widget().pack(fill=tk.BOTH, expand=True, pady=(0, 5))
+
+        # Bind click to the MAP canvas
+        self.comp_map_canvas.mpl_connect('button_press_event', self._on_comp_click)
+
+        # 2. RIGHT PANE: Results (Waterfall, Heatmap, Trend)
+        self.comp_right_frame = ttk.Frame(paned)
+        paned.add(self.comp_right_frame)
+
+        self.comp_res_fig = Figure(figsize=(8, 8), dpi=100)
+        self.comp_res_canvas = FigureCanvasTkAgg(self.comp_res_fig, master=self.comp_right_frame)
+        self.comp_res_canvas.get_tk_widget().pack(fill=tk.BOTH, expand=True)
+
+        toolbar = NavigationToolbar2Tk(self.comp_res_canvas, self.comp_right_frame)
+        toolbar.update()
+        toolbar.pack(side=tk.BOTTOM, fill=tk.X)
+
+        # Keyboard Binding (Needs focus on window)
+        self.window.bind("<Left>", lambda e: self._on_comp_arrow(-1, 0))
+        self.window.bind("<Right>", lambda e: self._on_comp_arrow(1, 0))
+        self.window.bind("<Up>", lambda e: self._on_comp_arrow(0, -1))
+        self.window.bind("<Down>", lambda e: self._on_comp_arrow(0, 1))
+
+        self._comp_update()
+
+    def _comp_update(self):
+        """Updates Comparison Plots: Map (Left Pane) and Results (Right Pane)."""
+        import matplotlib.cm as cm
+        import numpy as np
+        import lmfit
+        from matplotlib.gridspec import GridSpec
+        from skimage.exposure import match_histograms
+        from skimage.metrics import structural_similarity as ssim
+
+        # --- 1. PREPARE DATA ---
+        try:
+            ref_r, ref_c = self.comp_r.get(), self.comp_c.get()
+            cond_order = list(self.comp_listbox.get(0, tk.END))
+            if not cond_order: return
+
+            ref_key = self.ref_key
+            if ref_key not in self.cond_ans.data_dict: return
+            img_ref = self.cond_ans.data_dict[ref_key].get_live_scan()
+
+            # Params
+            w_size = self.comp_winsize.get()
+            if w_size % 2 == 0: w_size += 1
+            radius = self.comp_radius.get()
+            cmap_name = self.comp_cmap.get()
+
+            spectra_list = []
+            wl = None
+            valid_conds = []
+
+            # Prep Ref Image for Matching
+            pad = w_size // 2
+            img_ref_pad = np.pad(img_ref, pad, mode='reflect')
+            pr, pc = ref_r + pad, ref_c + pad
+            win_ref = img_ref_pad[pr - pad: pr + pad + 1, pc - pad: pc + pad + 1]
+            ref_min, ref_max = img_ref.min(), img_ref.max()
+
+            # --- LOOP OVER CONDITIONS (Collect Spectra) ---
+            for cond in cond_order:
+                if cond not in self.cond_ans.data_dict: continue
+                hsp = self.cond_ans.data_dict[cond]
+                data = hsp.get_numpy_spectra()
+                img_tar = hsp.get_live_scan()
+
+                curr_r, curr_c = ref_r, ref_c  # Default
+
+                # Perform SSIM Search if it's not the reference
+                if cond != ref_key:
+                    try:
+                        img_tar_matched = match_histograms(img_tar, img_ref)
+                    except:
+                        img_tar_matched = img_tar
+
+                    img_tar_pad = np.pad(img_tar_matched, pad, mode='reflect')
+                    min_r = max(pad, pr - radius)
+                    max_r = min(img_tar_pad.shape[0] - pad, pr + radius + 1)
+                    min_c = max(pad, pc - radius)
+                    max_c = min(img_tar_pad.shape[1] - pad, pc + radius + 1)
+
+                    d_range = max(ref_max, img_tar_matched.max()) - min(ref_min, img_tar_matched.min())
+                    if d_range == 0: d_range = 1
+
+                    best_score = -2.0
+                    for i in range(min_r, max_r):
+                        for j in range(min_c, max_c):
+                            win_tar = img_tar_pad[i - pad: i + pad + 1, j - pad: j + pad + 1]
+                            score = ssim(win_ref, win_tar, data_range=d_range,
+                                         gaussian_weights=True, win_size=w_size,
+                                         use_sample_covariance=False)
+                            if score > best_score:
+                                best_score = score
+                                curr_r, curr_c = i - pad, j - pad
+
+                # Extract Spectrum
+                if 0 <= curr_r < data.shape[0] and 0 <= curr_c < data.shape[1]:
+                    spec = data[curr_r, curr_c].astype(float)
+                    curr_wl = hsp.get_wavelengths()
+                    if wl is None: wl = curr_wl
+                    spectra_list.append(spec)
+                    valid_conds.append(cond)
+
+            if not spectra_list: return
+
+            # Process Spectra (Slice & Norm)
+            w0, w1 = self.comp_w0.get(), self.comp_w1.get()
+            if w1 > w0 and wl is not None:
+                mask = (wl >= w0) & (wl <= w1)
+                if np.sum(mask) > 1:
+                    wl = wl[mask]
+                    spectra_list = [s[mask] for s in spectra_list]
+
+            nm = self.comp_norm.get()
+            proc_specs = []
+            for s in spectra_list:
+                if nm == "Max":
+                    s = s / (np.max(s) + 1e-12)
+                elif nm == "Area":
+                    s = s / (np.sum(s) + 1e-12)
+                proc_specs.append(s)
+
+            # --- FIT PREPARATION ---
+            fits_overlay = []
+            trend_data = {"Max Int": [np.max(s) for s in spectra_list]}
+
+            fit_enabled = self.comp_live_fit.get()
+            composite = None
+            params_base = lmfit.Parameters()
+            param_names = []
+
+            # 1. Build Model & Parameter List (if enabled)
+            if fit_enabled:
+                peaks = self._collect_peak_params()
+                if peaks:
+                    if self.fit_bkg_flag:
+                        composite = lmfit.models.ConstantModel(prefix='bkg_')
+                        params_base.update(composite.make_params(bkg_c=0))
+                    for i, p in enumerate(peaks):
+                        m = p['func'](prefix=f'p{i}_')
+                        composite = m if composite is None else composite + m
+                        mp = m.make_params()
+                        for k in ['amplitude', 'center', 'sigma']:
+                            if k in p: mp[f'p{i}_{k}'].set(value=p[k])
+                            if k == 'gamma' and 'gamma' in p: mp[f'p{i}_{k}'].set(value=p['gamma'])
+                        params_base.update(mp)
+
+                    # Initialize lists for all expected parameters
+                    param_names = list(params_base.keys())
+                    for p_name in param_names:
+                        trend_data[p_name] = []
+
+
+            #TODO need to be debugged since it is not working properly
+
+            # 2. Fit Loop
+            if fit_enabled and composite is not None:
+                peaks = self._collect_peak_params()  # Get peaks once
+
+                for y_raw in spectra_list:
+                    try:
+                        # REBUILD the model for each iteration to avoid state pollution
+                        composite_temp = None
+                        params_temp = lmfit.Parameters()
+
+                        if self.fit_bkg_flag:
+                            composite_temp = lmfit.models.ConstantModel(prefix='bkg_')
+                            params_temp.update(composite_temp.make_params(bkg_c=0))
+
+                        for i, p in enumerate(peaks):
+                            m = p['func'](prefix=f'p{i}_')
+                            composite_temp = m if composite_temp is None else composite_temp + m
+                            mp = m.make_params()
+                            for k in ['amplitude', 'center', 'sigma']:
+                                if k in p: mp[f'p{i}_{k}'].set(value=p[k])
+                            if 'gamma' in p: mp[f'p{i}_gamma'].set(value=p['gamma'])
+                            params_temp.update(mp)
+
+                        # Now fit with the fresh model
+                        res = composite_temp.fit(y_raw, params_temp, x=wl, nan_policy='omit')
+                        y_fit = res.best_fit
+
+                        # Store Parameters
+                        for name in param_names:
+                            if name in res.params:
+                                trend_data[name].append(res.params[name].value)
+                            else:
+                                trend_data[name].append(np.nan)
+
+                        # Normalize fit for display overlay
+                        if nm == "Max":
+                            y_fit /= (np.max(y_raw) + 1e-12)
+                        elif nm == "Area":
+                            y_fit /= (np.sum(y_raw) + 1e-12)
+                        fits_overlay.append(y_fit)
+                    except Exception as e:
+                        # Enhanced debug output
+                        print(f"Fit failed for spectrum:")
+                        print(f"  Error: {e}")
+                        print(f"  y_raw shape: {y_raw.shape}")
+                        print(f"  y_raw range: [{np.nanmin(y_raw):.2f}, {np.nanmax(y_raw):.2f}]")
+                        print(f"  wl shape: {wl.shape}")
+                        print(f"  wl range: [{wl[0]:.2f}, {wl[-1]:.2f}]")
+                        print(f"  Has NaNs: {np.any(np.isnan(y_raw))}")
+                        import traceback
+                        traceback.print_exc()
+
+                        fits_overlay.append(None)
+                        for name in param_names:
+                            trend_data[name].append(np.nan)
+
+            else:
+                fits_overlay = [None] * len(spectra_list)
+
+            # --- UPDATE DROPDOWN ---
+            current_selection = self.comp_trend_param.get()
+            available_params = list(trend_data.keys())
+
+            # Sort: Max Int first, then naturally
+            available_params.sort(key=lambda x: (x != "Max Int", x))
+
+            menu = self.comp_trend_menu["menu"]
+            menu.delete(0, "end")
+
+            # Helper to refresh on selection
+            def _set_trend(val):
+                self.comp_trend_param.set(val)
+                self._comp_update()
+
+            for p in available_params:
+                menu.add_command(label=p, command=lambda v=p: _set_trend(v))
+
+            if current_selection not in available_params and available_params:
+                self.comp_trend_param.set(available_params[0])
+                current_selection = available_params[0]
+
+            # --- 2. DRAW FIGURES ---
+
+            # FIGURE A: MAP (Left Pane)
+            self.comp_map_fig.clear()
+            ax_map = self.comp_map_fig.gca()
+            if img_ref is not None:
+                h, w = img_ref.shape
+                ax_map.imshow(img_ref, cmap="gray", extent=[0, w, h, 0])
+                ax_map.plot(ref_c, ref_r, 'r+', markersize=12, markeredgewidth=2)
+            ax_map.set_title(f"Ref: {ref_key}", fontsize=10)
+            ax_map.axis("off")
+            self.comp_map_canvas.draw()
+
+            # FIGURE B: RESULTS (Right Pane)
+            self.comp_res_fig.clear()
+            gs = GridSpec(2, 2, width_ratios=[1.3, 1], height_ratios=[1, 1], wspace=0.25, hspace=0.25)
+
+            # 1. Waterfall (Full Left Column)
+            ax_wf = self.comp_res_fig.add_subplot(gs[:, 0])
+
+            offset = self.comp_offset.get()
+            if offset == 0.0: offset = np.max(proc_specs) * 0.55
+            try:
+                colors = cm.get_cmap(cmap_name)(np.linspace(0, 1, len(proc_specs)))
+            except:
+                colors = cm.get_cmap("viridis")(np.linspace(0, 1, len(proc_specs)))
+
+            N = len(proc_specs)
+            for i, y in enumerate(proc_specs):
+                # INVERTED STACKING: i=0 (Top), i=N-1 (Bottom)
+                stack_pos = N - 1 - i
+
+                ax_wf.plot(wl, y + stack_pos * offset, color=colors[i], lw=1.5, label=valid_conds[i])
+
+                # Overlay Fit if exists
+                if i < len(fits_overlay) and fits_overlay[i] is not None:
+                    ax_wf.plot(wl, fits_overlay[i] + stack_pos * offset, 'k--', lw=0.8, alpha=0.7)
+
+            ax_wf.set_title(f"Waterfall (N={len(valid_conds)})", fontsize=11)
+            ax_wf.set_xlabel("Wavelength (nm)")
+            ax_wf.set_yticks([])
+            ax_wf.legend(loc='upper right', fontsize=8, framealpha=0.5)
+
+            # 2. Heatmap (Top Right)
+            ax_hm = self.comp_res_fig.add_subplot(gs[0, 1])
+            hm_data = np.array(proc_specs)
+            ax_hm.imshow(hm_data, aspect='auto', cmap=cmap_name, extent=[wl[0], wl[-1], len(proc_specs), 0])
+            ax_hm.set_title("Heatmap", fontsize=11)
+            ax_hm.invert_xaxis()
+
+            ax_hm.set_yticks(np.arange(len(valid_conds)) + 0.5)
+            ax_hm.set_yticklabels(valid_conds, fontsize=8)
+
+            # 3. Trend (Bottom Right)
+            ax_tr = self.comp_res_fig.add_subplot(gs[1, 1])
+
+            if current_selection in trend_data:
+                y_vals = np.array(trend_data[current_selection])
+                x_vals = np.arange(len(valid_conds))
+
+                # Check if we have valid data (not all NaNs)
+                if not np.all(np.isnan(y_vals)) and len(y_vals) == len(x_vals):
+                    ax_tr.plot(x_vals, y_vals, 'o-', lw=1.5, markersize=4, color='tab:blue')
+                    ax_tr.scatter(x_vals, y_vals, c=colors, s=25, zorder=3)
+
+            ax_tr.set_xticks(np.arange(len(valid_conds)))
+            ax_tr.set_xticklabels(valid_conds, rotation=45, ha="right", fontsize=8)
+            ax_tr.set_title(f"Trend: {current_selection}", fontsize=11)
+            ax_tr.grid(alpha=0.4, linestyle='--')
+
+            # INVERTED TREND X-AXIS
+            ax_tr.invert_xaxis()
+
+            self.comp_res_fig.tight_layout()
+            self.comp_res_canvas.draw()
+
+        except Exception as e:
+            print(f"Comp Update Error: {e}")
+            import traceback
+            traceback.print_exc()
