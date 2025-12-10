@@ -1515,7 +1515,7 @@ class AnalysisPanel:
         controls = ttk.Frame(tab)
         controls.pack(fill=tk.X, padx=10, pady=5)
 
-        # Row 1: Dataset (for SE Image) & File Loading
+        # Row 1: Dataset (SE Image) & File Loading
         r1 = ttk.Frame(controls)
         r1.pack(fill=tk.X, pady=2)
 
@@ -1542,10 +1542,14 @@ class AnalysisPanel:
         self.pmap_param_cb.pack(side=tk.LEFT, padx=5)
         self.pmap_param_cb.bind("<<ComboboxSelected>>", lambda _: self._draw_param_map())
 
+        # --- NEW: eV Conversion Toggle ---
+        self.pmap_convert_ev = tk.BooleanVar(value=False)
+        ttk.Checkbutton(r2, text="nm → eV", variable=self.pmap_convert_ev,
+                        command=lambda: self._draw_param_map()).pack(side=tk.LEFT, padx=5)
+
         ttk.Label(r2, text="| Colormap:").pack(side=tk.LEFT, padx=(10, 0))
         self.pmap_cmap = tk.StringVar(value="viridis")
         cmaps = ['viridis', 'plasma', 'inferno', 'magma', 'turbo', 'jet', 'coolwarm', 'seismic']
-
         self.pmap_cmap_cb = ttk.Combobox(r2, textvariable=self.pmap_cmap, values=cmaps, width=10)
         self.pmap_cmap_cb.pack(side=tk.LEFT, padx=5)
         self.pmap_cmap_cb.bind("<<ComboboxSelected>>", lambda _: self._draw_param_map())
@@ -1654,29 +1658,34 @@ class AnalysisPanel:
                 img = getattr(hsp, 'get_live_scan', lambda: None)()
 
             # 2. Reconstruct Parameter Grid
-            # We assume row/col are 0-indexed integers
             max_r = self.pmap_df['row'].max()
             max_c = self.pmap_df['col'].max()
 
-            # Create a grid filled with NaNs (transparent in imshow)
+            # Grid of NaNs
             grid = np.full((max_r + 1, max_c + 1), np.nan)
 
-            # Fill grid
-            # Ensure we only take valid rows
+            # Extract Data
             valid_df = self.pmap_df.dropna(subset=['row', 'col', param])
             rows = valid_df['row'].astype(int)
             cols = valid_df['col'].astype(int)
-            vals = valid_df[param].values
+            vals = valid_df[param].values.astype(float)
 
-            # Safe assignment
-            # Clip indices just in case file has weird numbers
+            # --- NEW: eV Conversion Logic ---
+            # Apply only if checkbox is checked AND parameter name implies it's a wavelength/center
+            unit_label = param
+            if self.pmap_convert_ev.get() and "center" in param.lower():
+                # 1239.84193 / nm = eV
+                # Handle 0 or NaN to avoid crash
+                vals = np.divide(1239.84193, vals, out=np.full_like(vals, np.nan), where=vals != 0)
+                unit_label = f"{param} (eV)"
+
+            # Clip indices just in case
             rows = np.clip(rows, 0, max_r)
             cols = np.clip(cols, 0, max_c)
             grid[rows, cols] = vals
 
             # 3. Determine Color Limits
             if self.pmap_auto_scale.get():
-                # Use nanpercentile to ignore outliers if wanted, or just nanmin/max
                 vmin = np.nanmin(grid)
                 vmax = np.nanmax(grid)
                 self.pmap_vmin.set(vmin)
@@ -1689,33 +1698,27 @@ class AnalysisPanel:
             self.pmap_fig.clear()
             ax = self.pmap_fig.gca()
 
-            # A. Draw SE Image (Background)
+            # Draw SE Image (Background)
             if img is not None:
                 ih, iw = img.shape[:2]
                 ax.imshow(img, cmap='gray', extent=[0, iw, ih, 0])
-
-                # We need to scale the parameter grid to match the image extent
-                # If grid size == image size, simple. If different (e.g. binned), we rely on extent.
-                # Usually fit results match the scan dimensions.
+                # Overlay Map
                 ax.imshow(grid, cmap=self.pmap_cmap.get(), alpha=self.pmap_alpha.get(),
                           vmin=vmin, vmax=vmax, extent=[0, iw, ih, 0], interpolation='nearest')
             else:
-                # No SE image, just draw the map
-                im = ax.imshow(grid, cmap=self.pmap_cmap.get(),
-                               vmin=vmin, vmax=vmax, interpolation='nearest')
+                ax.imshow(grid, cmap=self.pmap_cmap.get(),
+                          vmin=vmin, vmax=vmax, interpolation='nearest')
 
-            # Add Colorbar
-            # We need a ScalarMappable for colorbar if we just drew over existing image
+            # Colorbar
             sm = plt.cm.ScalarMappable(cmap=self.pmap_cmap.get(), norm=plt.Normalize(vmin=vmin, vmax=vmax))
             sm.set_array([])
             cbar = self.pmap_fig.colorbar(sm, ax=ax, fraction=0.046, pad=0.04)
-            cbar.set_label(param)
+            cbar.set_label(unit_label)
 
-            ax.set_title(f"Map: {param}")
+            ax.set_title(f"Map: {unit_label}")
             ax.set_axis_off()
 
             self.pmap_canvas.draw()
 
         except Exception as e:
-            # traceback.print_exc()
             print(f"Map Draw Error: {e}")
